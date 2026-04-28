@@ -1,0 +1,12 @@
+{
+  "name": "f1-project",
+  "version": "1.0.0",
+  "description": "F1 Website - Angular + Node.js + MongoDB",
+  "scripts": {
+    "start": "node backend/server.js",
+    "import": "cd backend && npm run import",
+    "frontend": "cd frontend && npm start",
+    "build": "cd frontend && npm run build"
+  },
+  "dependencies": {}
+}
