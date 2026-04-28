@@ -13,7 +13,7 @@ const Result = require('../models/Result');
 const DriverStanding = require('../models/DriverStanding');
 
 const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/f1db';
-const CSV_DIR = process.env.CSV_DIR || path.join(__dirname, '../../archive');
+const CSV_DIR = process.env.CSV_DIR || path.join(__dirname, './archive');
 
 const stats = {
   startTime: null,

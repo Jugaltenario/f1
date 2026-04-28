@@ -1,9 +1,9 @@
-import { Injectable } from '@angular/core';
+import { EnvironmentInjector, Injectable } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
 import { Observable } from 'rxjs';
 import { Driver } from '../core/models/driver.model';
 
-const API_URL = 'http://localhost:3000/api';
+const API_URL = 'https://f1-mjj6.onrender.com/api';
 
 export interface Constructor {
   constructorId: number;
