@@ -13,6 +13,8 @@ const Race = require('./models/Race');
 const Result = require('./models/Result');
 const DriverStanding = require('./models/DriverStanding');
 
+const FRONTEND_URL = process.env.FRONTEND_URL || 'https://f1-sigma-jade.vercel.app';
+
 const app = express();
 
 app.use(cors());
@@ -25,7 +27,11 @@ app.use(morgan('combined', {
 }));
 
 const PORT = process.env.PORT || 3000;
-const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/f1db';
+const MONGO_URI = process.env.MONGO_URI;
+
+if (!MONGO_URI) {
+  logger.warn('MONGO_URI not set - running without database connection');
+}
 
 mongoose.connection.on('connecting', () => {
   dbLogger.info('Attempting to connect to MongoDB...');
@@ -43,12 +49,14 @@ mongoose.connection.on('disconnected', () => {
   dbLogger.warn('MongoDB disconnected');
 });
 
-mongoose.connect(MONGO_URI, {
-  serverSelectionTimeoutMS: 5000,
-  socketTimeoutMS: 45000,
-})
-  .then(() => logger.info('MongoDB connection established'))
-  .catch(err => logger.error('MongoDB connection failed:', { error: err.message, stack: err.stack }));
+if (MONGO_URI) {
+  mongoose.connect(MONGO_URI, {
+    serverSelectionTimeoutMS: 5000,
+    socketTimeoutMS: 45000,
+  })
+    .then(() => logger.info('MongoDB connection established'))
+    .catch(err => logger.error('MongoDB connection failed:', { error: err.message, stack: err.stack }));
+}
 
 app.use((req, res, next) => {
   const start = Date.now();
@@ -771,6 +779,10 @@ app.get('/api/champions', async (req, res) => {
   }
 });
 
+app.get('/', (req, res) => {
+  res.redirect(301, FRONTEND_URL);
+});
+
 app.use((req, res) => {
   apiLogger.warn(`Route not found`, { 
     method: req.method, 
@@ -786,13 +798,6 @@ app.use((req, res) => {
   });
 });
 
-if (process.env.NODE_ENV === 'production') {
-  app.use(express.static(path.join(__dirname, '../frontend/dist/frontend')));
-  app.get('*', (req, res) => {
-    res.sendFile(path.join(__dirname, '../frontend/dist/frontend/index.html'));
-  });
-}
-
 app.listen(PORT, () => {
   logger.info(`
 ╔════════════════════════════════════════════════════════════╗
@@ -801,24 +806,20 @@ app.listen(PORT, () => {
 ║                                                            ║
 ║   Environment: ${(process.env.NODE_ENV || 'development').padEnd(36)}║
 ║   Port: ${PORT.toString().padEnd(46)}║
-║   MongoDB: ${MONGO_URI.substring(0, 30).padEnd(46)}║
+║   MongoDB: ${MONGO_URI ? MONGO_URI.substring(0, 30).padEnd(46) : 'Not configured'.padEnd(46)}║
+║   Frontend: ${FRONTEND_URL.padEnd(40)}║
 ║                                                            ║
 ║   Endpoints:                                               ║
-║   - GET /api/health     - Health check                    ║
-║   - GET /api/info       - API information                 ║
-║   - GET /api/drivers    - List all drivers                ║
-║   - GET /api/constructors - List all constructors         ║
-║   - GET /api/circuits   - List all circuits               ║
-║   - GET /api/races      - List all races                  ║
-║   - GET /api/results/:raceId - Get race results           ║
-║   - GET /api/latest-results - Latest race results         ║
-║   - GET /api/standings/:year - Season standings           ║
-║                                                            ║
-║   Logs:                                                    ║
-║   - ./logs/error.log    - Error logs                      ║
-║   - ./logs/combined.log - All logs                        ║
-║   - ./logs/api.log     - API request logs                 ║
-║   - ./logs/database.log - Database logs                  ║
+║   - GET /            - Redirect to frontend                ║
+║   - GET /api/health  - Health check                        ║
+║   - GET /api/info    - API information                     ║
+║   - GET /api/drivers - List all drivers                   ║
+║   - GET /api/constructors - List all constructors          ║
+║   - GET /api/circuits - List all circuits                  ║
+║   - GET /api/races    - List all races                    ║
+║   - GET /api/results/:raceId - Get race results            ║
+║   - GET /api/latest-results - Latest race results           ║
+║   - GET /api/standings/:year - Season standings             ║
 ║                                                            ║
 ╚════════════════════════════════════════════════════════════╝
   `);
