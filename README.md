@@ -2,7 +2,8 @@
 
 **Name:** Jugal Patel · Krish Patel · Paavan Sharma
 **Enr.No:** 24162581032 · 24162581017 · 24162581052
-**Subject:** FET
+**Subject:** Micro Services
+
 
 A single-page Formula 1 archive covering every season from **2000 to the current season**, reconciled to **26 October 2026**. The browser ships the complete 2000–2026 dataset for instant, offline-friendly stats, then hands over to **OpenF1** for 2023-onward sessions, live timing, race control, weather and car telemetry.
 
