@@ -374,7 +374,7 @@ Endpoints include `/api/health`, `/api/drivers`, `/api/races`, `/api/results/:ra
 
 ## License
 
-Educational project for the FET subject. Formula 1 data belongs to its respective owners; OpenF1 is used under its public API terms.
+Educational project for the Microservice subject. Formula 1 data belongs to its respective owners; OpenF1 is used under its public API terms.
 
 ---
 
