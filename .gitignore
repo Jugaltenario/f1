@@ -21,5 +21,8 @@ frontend/node_modules/
 .DS_Store
 Thumbs.db
 
+# Office lock files
+~$*
+
 # Archive raw (optional - keep if you want)
 # archive/

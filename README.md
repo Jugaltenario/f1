@@ -1,930 +1,380 @@
-# F1 Racing Stats Web Application
+# Paddock — Formula 1 archive
 
-**Name:** Jugal Patel  
-**Enr.No:** 24162581032  
-**Sub:** FET
+**Name:** Jugal Patel · Krish Patel · Paavan Sharma
+**Enr.No:** 24162581032 · 24162581017 · 24162581052
+**Subject:** FET
 
----
+A single-page Formula 1 archive covering every season from **2000 to the current season**, reconciled to **26 October 2026**. The browser ships the complete 2000–2026 dataset for instant, offline-friendly stats, then hands over to **OpenF1** for 2023-onward sessions, live timing, race control, weather and car telemetry.
 
-A full-stack Formula 1 racing statistics web application built with Angular, Node.js, Express, and MongoDB. The application provides a comprehensive REST API for accessing F1 racing data including drivers, constructors, circuits, races, results, and championship standings.
-
-## Table of Contents
-
-- [Tech Stack](#tech-stack)
-- [Project Structure](#project-structure)
-- [Database Models](#database-models)
-- [API Endpoints](#api-endpoints)
-- [Source Code](#source-code)
-- [How It Was Made](#how-it-was-made)
-- [Getting Started](#getting-started)
-- [Future Enhancements](#future-enhancements)
+The interface is a **brushed-silver editorial** system: matte metal surfaces, hairline rules, one red accent, Titillium Web for UI and Source Serif 4 for long-form history. It is deliberately not a dark, glassy dashboard. Thirty distinct circuit outlines, drawn in black ink at a uniform 20%, cover the background edge to edge — no corner pile, no vignette — and the home screen pairs the McLaren MP4/4 with the live 2026 championship table.
 
 ---
 
-## Tech Stack
+## Table of contents
+
+- [What is in the app](#what-is-in-the-app)
+- [Screens](#screens)
+- [Screens and routes](#screens-and-routes)
+- [Data sources](#data-sources)
+- [Tech stack](#tech-stack)
+- [Project structure](#project-structure)
+- [Getting started](#getting-started)
+- [Scripts](#scripts)
+- [OpenF1 live timing and tokens](#openf1-live-timing-and-tokens)
+- [Data pipeline](#data-pipeline)
+- [Design system](#design-system)
+- [Imagery and licensing](#imagery-and-licensing)
+- [Performance and accessibility](#performance-and-accessibility)
+- [Production build](#production-build)
+- [Optional legacy backend](#optional-legacy-backend)
+- [Limitations and next steps](#limitations-and-next-steps)
+- [License](#license)
+
+---
+
+## What is in the app
+
+- **Modern-era scope.** Only 2000-onward drivers, teams, circuits, races and championships are bundled. Pre-2000 personalities and rivalries are gone from the UI and the shipped CSVs.
+- **Eleven screens**, covering the home page, standings, drivers, teams, circuits, races, race detail, live timing, history, rivalry and image credits.
+- **The archive runs to the current season.** 2000–2025 are complete; 2026 is reconciled through round 18 of 23 (26 October 2026). In-progress seasons show a **leader**, never a fabricated champion.
+- **Championship context everywhere.** Driver and team profiles show career totals, title years, season history and team-mates, all computed from archive rows rather than hard-coded.
+- **Race detail pages.** Podium, fastest lap, grid gains, full classification, qualifying (Q1/Q2/Q3) and circuit context for all 526 archived races.
+- **Head-to-head rivalry engine.** Any two drivers can be compared by career totals, points trajectory and shared-season championship positions.
+- **Wikipedia-style history.** Five eras, legendary rivalries, a champions table and computed record holders in a single long-form article. The old `/timeline` route now redirects to `/history`.
+- **OpenF1 live timing.** Session replay for 2023-onward, timing tower with gaps/intervals/tyres/pit stops, weather, race-control feed and per-lap speed/gear/DRS telemetry.
+- **Real imagery.** Team logos, 39 circuit maps and 28 driver portraits are bundled locally. Historic teams without a licensable mark render a typographic crest rather than a broken image.
+- **Attribution built in.** Every image is listed with its source and licence on `/credits`, alongside a trademark notice.
+
+---
+
+## Screens
+
+| Home | Standings |
+|---|---|
+| ![Home](docs/screenshots/home.png) | ![Standings](docs/screenshots/standings.png) |
+
+| History | Circuits |
+|---|---|
+| ![History](docs/screenshots/history.png) | ![Circuits](docs/screenshots/circuits.png) |
+
+| Race detail | Live timing |
+|---|---|
+| ![Race detail](docs/screenshots/race-detail.png) | ![Live timing](docs/screenshots/live.png) |
+
+---
+
+## Screens and routes
+
+| Route | Screen | Highlights |
+|---|---|---|
+| `/` | Home | Brushed hero with the McLaren MP4/4, 2026 top-five board, archive totals, latest and next race, 2025 champion feature |
+| `/standings?year=2026` | Season standings | Drivers' and constructors' tables, champion/leader card, points gap, season switcher |
+| `/drivers` | Drivers | Searchable, sortable grid; profile dialog with career totals, titles, seasons and teams |
+| `/constructors` | Teams | Team grid with real logos or typographic crests, title years, driver line-ups and career totals |
+| `/circuits` | Circuits | Searchable circuit library with a world map, circuit-layout images and a detail panel |
+| `/races?year=2026` | Races | Season calendar, winners, podiums; year switcher |
+| `/races/202618` | Race detail | Winner hero, podium, fastest lap, classification, qualifying tabs, previous/next round, circuit and season context |
+| `/live?year=2026` | Live timing | OpenF1 meeting/session pickers, timing tower, weather, race control, lap telemetry, optional token |
+| `/history` | History | Wikipedia-style article: lead, infobox, five eras, four rivalries, champions table and records |
+| `/rivalry?d1=1&d2=830` | Rivalry engine | Two-driver picker, career totals, points chart, season-by-season table, head-to-head score |
+| `/credits` | Credits | Generated list of every image, its source and licence, plus a trademark notice |
+
+All screens are lazy-loaded except Home and share one flat silver component library. The layout responds down to phone widths.
+
+---
+
+## Data sources
+
+### Bundled archive (2000–2026)
+
+The frontend reads CSV files from `frontend/src/assets/archive/` with PapaParse. The pruned set is about **1.3 MB** and contains:
+
+| File | Contents |
+|---|---|
+| `drivers.csv` | 130 drivers |
+| `constructors.csv` | 40 teams |
+| `circuits.csv` | 39 circuits |
+| `races.csv` | 526 races across 27 seasons |
+| `results.csv` | 10,954 race results |
+| `qualifying.csv` | 9,968 qualifying rows |
+| `season_standings.csv` | Final or current drivers' standings per season |
+| `season_constructor_standings.csv` | Final or current constructors' standings per season |
+| `status.csv` | Result status labels |
+| `meta.json` | Generated timestamp, year range, complete seasons, current season and row counts |
+
+`frontend/src/app/core/services/csv-data.service.ts` indexes these files once, then derives careers, championships, circuit histories, standings, race details, season summaries and rivalry data. Derived values are cached with `shareReplay`.
+
+The first 25 seasons come from the Ergast dump. **2025 and 2026 were appended from Jolpica** by `scripts/sync-current-season.mjs`, including sprint-aware results, qualifying, standings and the new Audi, Cadillac and Madring entries.
+
+### OpenF1 (2023 → present)
+
+`frontend/src/app/core/services/openf1.service.ts` wraps the public API:
+
+- `https://api.openf1.org/v1` — sessions, meetings, drivers, positions, intervals, laps, stints, pit stops, weather, race control, car data.
+- Free tier: historical sessions, no key required.
+- Rate limit: 3 requests/second. The client uses a token bucket (burst 3, refill about every 340 ms) plus an in-memory response cache.
+- Telemetry is requested only for one driver and one lap at a time, using date-window filters. Whole-session `car_data` is never downloaded.
+
+---
+
+## Tech stack
 
 | Layer | Technology |
-|-------|------------|
-| Frontend | Angular (TypeScript) |
-| Backend | Node.js + Express.js |
-| Database | MongoDB with Mongoose ODM |
-| Data Import | CSV files via csvtojson |
-| Logging | Winston |
-| HTTP Logging | Morgan |
+|---|---|
+| Framework | Angular 21.2, standalone components, signals, new control flow |
+| UI | Angular Material 21 + CDK, custom SCSS design system |
+| Data | PapaParse / ngx-papaparse, RxJS, Jolpica + OpenF1 REST APIs |
+| Charts | Hand-built SVG spark chart and telemetry trace (no charting dependency) |
+| Typography | Titillium Web (UI) and Source Serif 4 (article body), both self-described in `index.html` |
+| Imagery | Locally bundled logos, circuit maps, portraits and archive photography |
+| Build | Angular CLI 21 / esbuild, SCSS |
+| Optional backend | Node.js, Express, Mongoose, MongoDB (legacy REST API, not required by the UI) |
 
 ---
 
-## Project Structure
+## Project structure
 
-```
+```text
 f1/
-├── archive/                    # CSV data files
-│   ├── drivers.csv
-│   ├── constructors.csv
-│   ├── circuits.csv
-│   ├── races.csv
-│   ├── results.csv
-│   ├── driver_standings.csv
-│   └── ...
-├── backend/
-│   ├── server.js             # Main Express server
-│   ├── models/               # Mongoose schemas
-│   ├── import/               # CSV import script
-│   └── utils/                # Logger configuration
 ├── frontend/
+│   ├── angular.json                 # build + budgets
 │   └── src/
-│       ├── main.ts           # Angular entry point
-│       └── styles.scss      # Styles
-├── images/                   # Car images & logos
-└── package.json
+│       ├── index.html
+│       ├── styles.scss              # global silver surface/button/table system
+│       ├── styles/_tokens.scss      # colour, type, radius, elevation, motion tokens
+│       └── app/
+│           ├── app.ts               # shell: floating maps, navbar, router outlet, footer
+│           ├── app.config.ts        # router, HTTP, animations, Material dialog
+│           ├── app.routes.ts        # 11 lazy routes + /timeline redirect
+│           ├── components/navbar/   # brushed navbar + mobile sheet
+│           ├── core/
+│           │   ├── config/          # data scope, team colours, asset + outline manifests
+│           │   ├── models/          # archive + OpenF1 types
+│           │   ├── services/        # CSVDataService, OpenF1Service
+│           │   └── utils/           # formatting, countries, flags
+│           ├── features/
+│           │   └── rivalry/         # head-to-head engine
+│           ├── pages/               # home, standings, drivers, constructors,
+│           │                        # circuits, races, race-detail, live,
+│           │                        # history, credits
+│           └── shared/components/   # panel, page header, stat tile, avatar,
+│                                    # team badge, track background, charts, skeletons
+├── scripts/
+│   ├── prune-archive.mjs            # rebuilds the 2000–2024 base CSVs
+│   ├── sync-current-season.mjs      # appends 2025–2026 from Jolpica
+│   ├── fetch-assets.mjs             # downloads logos/maps/photos + manifest
+│   ├── extract-circuit-outlines.mjs # builds the floating-map outlines
+│   ├── build-docs.py                # README.md → README.docx
+│   └── build-deck.py                # builds the 15-slide presentation
+├── archive/                         # full source dataset for the backend
+├── backend/                         # optional Express + MongoDB API
+├── docs/screenshots/                # app screenshots used in the docs/deck
+├── README.md / README.docx / README.pdf
+└── f1-presentation.pptx / f1-presentation.pdf
 ```
 
 ---
 
-## Database Models
+## Getting started
 
-### Driver Model (`backend/models/Driver.js`)
+### Requirements
 
-```javascript
-const mongoose = require('mongoose');
+- Node.js 20+ (Node 24 tested)
+- npm 10+
+- A modern browser
+- Python 3 with `python-docx` and `python-pptx` — only needed to rebuild the report and deck
 
-const driverSchema = new mongoose.Schema({
-  driverId: { type: Number, unique: true },
-  driverRef: String,
-  number: Number,
-  code: String,
-  forename: String,
-  surname: String,
-  dob: Date,
-  nationality: String,
-  url: String
-});
+No database or API key is needed to run the app.
 
-module.exports = mongoose.model('Driver', driverSchema);
-```
-
-### Race Model (`backend/models/Race.js`)
-
-```javascript
-const mongoose = require('mongoose');
-
-const raceSchema = new mongoose.Schema({
-  raceId: { type: Number, unique: true },
-  year: Number,
-  round: Number,
-  circuitId: Number,
-  name: String,
-  date: Date,
-  time: String,
-  url: String,
-  fp1_date: Date,
-  fp1_time: String,
-  fp2_date: Date,
-  fp2_time: String,
-  fp3_date: Date,
-  fp3_time: String,
-  quali_date: Date,
-  quali_time: String,
-  sprint_date: Date,
-  sprint_time: String
-});
-
-module.exports = mongoose.model('Race', raceSchema);
-```
-
-### Result Model (`backend/models/Result.js`)
-
-```javascript
-const mongoose = require('mongoose');
-
-const resultSchema = new mongoose.Schema({
-  resultId: { type: Number, unique: true },
-  raceId: Number,
-  driverId: Number,
-  constructorId: Number,
-  number: Number,
-  grid: Number,
-  position: Number,
-  positionText: String,
-  positionOrder: Number,
-  points: Number,
-  laps: Number,
-  time: String,
-  milliseconds: Number,
-  fastestLap: Number,
-  rank: Number,
-  fastestLapTime: String,
-  fastestLapSpeed: String,
-  statusId: Number
-});
-
-module.exports = mongoose.model('Result', resultSchema);
-```
-
----
-
-## API Endpoints
-
-### Health & Info
-
-| Method | Endpoint | Description |
-|-------|----------|-------------|
-| GET | `/api/health` | Health check with MongoDB status |
-| GET | `/api/info` | API information and endpoints |
-
-### Drivers
-
-| Method | Endpoint | Description |
-|-------|----------|-------------|
-| GET | `/api/drivers` | List all drivers |
-| GET | `/api/drivers/:id` | Get driver by ID |
-| GET | `/api/drivers/stats` | Get driver statistics (wins, podiums) |
-
-### Constructors
-
-| Method | Endpoint | Description |
-|-------|----------|-------------|
-| GET | `/api/constructors` | List all constructors |
-| GET | `/api/constructors/:id` | Get constructor by ID |
-
-### Circuits
-
-| Method | Endpoint | Description |
-|-------|----------|-------------|
-| GET | `/api/circuits` | List all circuits |
-| GET | `/api/circuits/:id` | Get circuit by ID |
-
-### Races & Results
-
-| Method | Endpoint | Description |
-|-------|----------|-------------|
-| GET | `/api/races` | List all races (supports `?year=2024`) |
-| GET | `/api/races/:id` | Get race by ID |
-| GET | `/api/results/:raceId` | Get results for a specific race |
-| GET | `/api/latest-results` | Get results for the latest race |
-| GET | `/api/standings/:year` | Get driver standings for a year |
-| GET | `/api/champions` | Get current championship standings |
-
----
-
-## Source Code
-
-### Main Server (`backend/server.js`)
-
-```javascript
-const express = require('express');
-const mongoose = require('mongoose');
-const cors = require('cors');
-const morgan = require('morgan');
-const path = require('path');
-
-const { logger, apiLogger, dbLogger } = require('./utils/logger');
-
-const Driver = require('./models/Driver');
-const Constructor = require('./models/Constructor');
-const Circuit = require('./models/Circuit');
-const Race = require('./models/Race');
-const Result = require('./models/Result');
-const DriverStanding = require('./models/DriverStanding');
-
-const app = express();
-
-app.use(cors());
-app.use(express.json());
-
-app.use(morgan('combined', {
-  stream: {
-    write: (message) => apiLogger.http(message.trim())
-  }
-}));
-
-const PORT = process.env.PORT || 3000;
-const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/f1db';
-
-mongoose.connect(MONGO_URI, {
-  serverSelectionTimeoutMS: 5000,
-  socketTimeoutMS: 45000,
-})
-  .then(() => logger.info('MongoDB connection established'))
-  .catch(err => logger.error('MongoDB connection failed:', { error: err.message, stack: err.stack }));
-
-app.get('/api/health', (req, res) => {
-  const healthcheck = {
-    uptime: process.uptime(),
-    message: 'OK',
-    timestamp: Date.now(),
-    mongodb: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
-    environment: process.env.NODE_ENV || 'development'
-  };
-  
-  try {
-    res.status(200).json(healthcheck);
-  } catch (error) {
-    healthcheck.message = error.message;
-    res.status(503).json(healthcheck);
-  }
-});
-
-app.get('/api/drivers', async (req, res) => {
-  const requestId = Date.now().toString(36);
-  apiLogger.info(`[${requestId}] GET /api/drivers`, { query: req.query });
-  
-  try {
-    const startTime = Date.now();
-    const drivers = await Driver.find();
-    const duration = Date.now() - startTime;
-    
-    apiLogger.info(`[${requestId}] Retrieved ${drivers.length} drivers`, { duration: `${duration}ms` });
-    
-    res.status(200).json({
-      success: true,
-      count: drivers.length,
-      data: drivers,
-      timestamp: new Date().toISOString(),
-      requestId
-    });
-  } catch (err) {
-    apiLogger.error(`[${requestId}] Error fetching drivers`, { 
-      error: err.message, 
-      stack: err.stack 
-    });
-    
-    res.status(500).json({
-      success: false,
-      error: 'Failed to fetch drivers',
-      message: err.message,
-      timestamp: new Date().toISOString(),
-      requestId
-    });
-  }
-});
-
-app.get('/api/drivers/:id', async (req, res) => {
-  const requestId = Date.now().toString(36);
-  apiLogger.info(`[${requestId}] GET /api/drivers/${req.params.id}`);
-  
-  try {
-    const startTime = Date.now();
-    const driver = await Driver.findOne({ driverId: req.params.id });
-    const duration = Date.now() - startTime;
-    
-    if (!driver) {
-      apiLogger.warn(`[${requestId}] Driver not found`, { id: req.params.id });
-      
-      return res.status(404).json({
-        success: false,
-        error: 'Driver not found',
-        message: `No driver found with ID ${req.params.id}`,
-        timestamp: new Date().toISOString(),
-        requestId
-      });
-    }
-    
-    res.status(200).json({
-      success: true,
-      data: driver,
-      timestamp: new Date().toISOString(),
-      requestId
-    });
-  } catch (err) {
-    apiLogger.error(`[${requestId}] Error fetching driver`, { 
-      error: err.message, 
-      stack: err.stack,
-      id: req.params.id
-    });
-    
-    res.status(500).json({
-      success: false,
-      error: 'Failed to fetch driver',
-      message: err.message,
-      timestamp: new Date().toISOString(),
-      requestId
-    });
-  }
-});
-
-app.get('/api/races', async (req, res) => {
-  const requestId = Date.now().toString(36);
-  apiLogger.info(`[${requestId}] GET /api/races`, { query: req.query });
-  
-  try {
-    const startTime = Date.now();
-    const { year, limit } = req.query;
-    const filter = year ? { year: parseInt(year) } : {};
-    const races = await Race.find(filter)
-      .sort({ date: -1 })
-      .limit(limit ? parseInt(limit) : 0);
-    const duration = Date.now() - startTime;
-    
-    res.status(200).json({
-      success: true,
-      count: races.length,
-      data: races,
-      timestamp: new Date().toISOString(),
-      requestId
-    });
-  } catch (err) {
-    apiLogger.error(`[${requestId}] Error fetching races`, { 
-      error: err.message, 
-      stack: err.stack 
-    });
-    
-    res.status(500).json({
-      success: false,
-      error: 'Failed to fetch races',
-      message: err.message,
-      timestamp: new Date().toISOString(),
-      requestId
-    });
-  }
-});
-
-app.get('/api/results/:raceId', async (req, res) => {
-  const requestId = Date.now().toString(36);
-  apiLogger.info(`[${requestId}] GET /api/results/${req.params.raceId}`);
-  
-  try {
-    const startTime = Date.now();
-    const results = await Result.find({ raceId: req.params.raceId })
-      .sort({ positionOrder: 1 })
-      .populate('driverId')
-      .populate('constructorId');
-    const duration = Date.now() - startTime;
-    
-    res.status(200).json({
-      success: true,
-      count: results.length,
-      data: results,
-      timestamp: new Date().toISOString(),
-      requestId
-    });
-  } catch (err) {
-    apiLogger.error(`[${requestId}] Error fetching results`, { 
-      error: err.message, 
-      stack: err.stack,
-      raceId: req.params.raceId
-    });
-    
-    res.status(500).json({
-      success: false,
-      error: 'Failed to fetch results',
-      message: err.message,
-      timestamp: new Date().toISOString(),
-      requestId
-    });
-  }
-});
-
-app.get('/api/latest-results', async (req, res) => {
-  const requestId = Date.now().toString(36);
-  apiLogger.info(`[${requestId}] GET /api/latest-results`);
-  
-  try {
-    const startTime = Date.now();
-    const latestRace = await Race.findOne().sort({ date: -1 });
-    
-    if (!latestRace) {
-      return res.status(404).json({
-        success: false,
-        error: 'No races found',
-        message: 'No race data available in the database',
-        timestamp: new Date().toISOString(),
-        requestId
-      });
-    }
-    
-    const results = await Result.find({ raceId: latestRace.raceId })
-      .sort({ positionOrder: 1 })
-      .populate('driverId')
-      .populate('constructorId');
-    
-    const duration = Date.now() - startTime;
-    
-    res.status(200).json({
-      success: true,
-      race: latestRace,
-      results,
-      timestamp: new Date().toISOString(),
-      requestId
-    });
-  } catch (err) {
-    apiLogger.error(`[${requestId}] Error fetching latest results`, { 
-      error: err.message, 
-      stack: err.stack 
-    });
-    
-    res.status(500).json({
-      success: false,
-      error: 'Failed to fetch latest results',
-      message: err.message,
-      timestamp: new Date().toISOString(),
-      requestId
-    });
-  }
-});
-
-app.get('/api/standings/:year', async (req, res) => {
-  const requestId = Date.now().toString(36);
-  apiLogger.info(`[${requestId}] GET /api/standings/${req.params.year}`);
-  
-  try {
-    const startTime = Date.now();
-    const year = parseInt(req.params.year);
-    const latestRace = await Race.findOne({ year }).sort({ date: -1 });
-    
-    if (!latestRace) {
-      return res.status(404).json({
-        success: false,
-        error: 'No races found',
-        message: `No races found for year ${year}`,
-        timestamp: new Date().toISOString(),
-        requestId
-      });
-    }
-    
-    const standings = await DriverStanding.find({ raceId: latestRace.raceId })
-      .sort({ position: 1 })
-      .populate('driverId');
-    
-    const duration = Date.now() - startTime;
-    
-    res.status(200).json({
-      success: true,
-      year,
-      race: latestRace.name,
-      standings,
-      timestamp: new Date().toISOString(),
-      requestId
-    });
-  } catch (err) {
-    apiLogger.error(`[${requestId}] Error fetching standings`, { 
-      error: err.message, 
-      stack: err.stack,
-      year: req.params.year
-    });
-    
-    res.status(500).json({
-      success: false,
-      error: 'Failed to fetch standings',
-      message: err.message,
-      timestamp: new Date().toISOString(),
-      requestId
-    });
-  }
-});
-
-if (process.env.NODE_ENV === 'production') {
-  app.use(express.static(path.join(__dirname, '../frontend/dist/frontend')));
-  app.get('*', (req, res) => {
-    res.sendFile(path.join(__dirname, '../frontend/dist/frontend/index.html'));
-  });
-}
-
-app.listen(PORT, () => {
-  logger.info(`
-╔════════════════════════════════════════════════════════════���
-║                                                            ║
-║   🚀 F1 API Server Started                                ║
-║                                                            ║
-║   Environment: ${(process.env.NODE_ENV || 'development').padEnd(36)}║
-║   Port: ${PORT.toString().padEnd(46)}║
-║   MongoDB: ${MONGO_URI.substring(0, 30).padEnd(46)}║
-║                                                            ║
-╚════════════════════════════════════════════════════════════╝
-  `);
-});
-
-module.exports = app;
-```
-
-### CSV Import Script (`backend/import/csvImport.js`)
-
-```javascript
-const csvtojson = require('csvtojson');
-const mongoose = require('mongoose');
-const path = require('path');
-const fs = require('fs');
-
-const { logger, importLogger, dbLogger } = require('../utils/logger');
-
-const Driver = require('../models/Driver');
-const Constructor = require('../models/Constructor');
-const Circuit = require('../models/Circuit');
-const Race = require('../models/Race');
-const Result = require('../models/Result');
-const DriverStanding = require('../models/DriverStanding');
-
-const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/f1db';
-const CSV_DIR = process.env.CSV_DIR || path.join(__dirname, '../../archive');
-
-function convertNull(value) {
-  return value === '\\N' ? null : value;
-}
-
-function convertNumber(value) {
-  if (value === '\\N' || value === null || value === '') return null;
-  const num = parseInt(value);
-  return isNaN(num) ? null : num;
-}
-
-function convertFloat(value) {
-  if (value === '\\N' || value === null || value === '') return null;
-  const num = parseFloat(value);
-  return isNaN(num) ? null : num;
-}
-
-function convertDate(value) {
-  if (value === '\\N' || !value) return null;
-  try {
-    return new Date(value);
-  } catch (err) {
-    importLogger.warn(`Date conversion error: ${value}`, { error: err.message });
-    return null;
-  }
-}
-
-async function importDrivers() {
-  const startTime = Date.now();
-  const filePath = path.join(CSV_DIR, 'drivers.csv');
-  
-  importLogger.info('Starting drivers import...', { file: filePath });
-  
-  const json = await csvtojson().fromFile(filePath);
-  const drivers = [];
-  
-  for (let i = 0; i < json.length; i++) {
-    const row = json[i];
-    drivers.push({
-      driverId: convertNumber(row.driverId),
-      driverRef: convertNull(row.driverRef),
-      number: convertNumber(row.number),
-      code: convertNull(row.code),
-      forename: convertNull(row.forename),
-      surname: convertNull(row.surname),
-      dob: convertDate(row.dob),
-      nationality: convertNull(row.nationality),
-      url: convertNull(row.url)
-    });
-  }
-  
-  await Driver.deleteMany({});
-  if (drivers.length > 0) {
-    await Driver.insertMany(drivers);
-  }
-  
-  const duration = Date.now() - startTime;
-  importLogger.info(`✅ Drivers import complete!`, { imported: drivers.length, totalTime: duration });
-}
-
-async function importRaces() {
-  const startTime = Date.now();
-  const filePath = path.join(CSV_DIR, 'races.csv');
-  
-  const json = await csvtojson().fromFile(filePath);
-  const races = [];
-  
-  for (let i = 0; i < json.length; i++) {
-    const row = json[i];
-    races.push({
-      raceId: convertNumber(row.raceId),
-      year: convertNumber(row.year),
-      round: convertNumber(row.round),
-      circuitId: convertNumber(row.circuitId),
-      name: convertNull(row.name),
-      date: convertDate(row.date),
-      time: convertNull(row.time),
-      url: convertNull(row.url),
-      fp1_date: convertDate(row.fp1_date),
-      fp1_time: convertNull(row.fp1_time),
-      fp2_date: convertDate(row.fp2_date),
-      fp2_time: convertNull(row.fp2_time),
-      fp3_date: convertDate(row.fp3_date),
-      fp3_time: convertNull(row.fp3_time),
-      quali_date: convertDate(row.quali_date),
-      quali_time: convertNull(row.quali_time),
-      sprint_date: convertDate(row.sprint_date),
-      sprint_time: convertNull(row.sprint_time)
-    });
-  }
-  
-  await Race.deleteMany({});
-  if (races.length > 0) {
-    await Race.insertMany(races);
-  }
-  
-  const duration = Date.now() - startTime;
-  importLogger.info(`✅ Races import complete!`, { imported: races.length, totalTime: duration });
-}
-
-async function importResults() {
-  const startTime = Date.now();
-  const filePath = path.join(CSV_DIR, 'results.csv');
-  
-  const json = await csvtojson().fromFile(filePath);
-  const results = [];
-  const batchSize = 5000;
-  
-  for (let i = 0; i < json.length; i++) {
-    const row = json[i];
-    results.push({
-      resultId: convertNumber(row.resultId),
-      raceId: convertNumber(row.raceId),
-      driverId: convertNumber(row.driverId),
-      constructorId: convertNumber(row.constructorId),
-      number: convertNumber(row.number),
-      grid: convertNumber(row.grid),
-      position: convertNumber(row.position),
-      positionText: convertNull(row.positionText),
-      positionOrder: convertNumber(row.positionOrder),
-      points: convertFloat(row.points),
-      laps: convertNumber(row.laps),
-      time: convertNull(row.time),
-      milliseconds: convertNumber(row.milliseconds),
-      fastestLap: convertNumber(row.fastestLap),
-      rank: convertFloat(row.rank),
-      fastestLapTime: convertNull(row.fastestLapTime),
-      fastestLapSpeed: convertFloat(row.fastestLapSpeed),
-      statusId: convertNumber(row.statusId)
-    });
-  }
-  
-  await Result.deleteMany({});
-  
-  for (let i = 0; i < results.length; i += batchSize) {
-    const batch = results.slice(i, i + batchSize);
-    await Result.insertMany(batch);
-    importLogger.info(`Inserted batch ${Math.floor(i / batchSize) + 1}/${Math.ceil(results.length / batchSize)}`);
-  }
-  
-  const duration = Date.now() - startTime;
-  importLogger.info(`✅ Results import complete!`, { imported: results.length, totalTime: duration });
-}
-
-async function run() {
-  importLogger.info('🏁 F1 CSV Data Import Starting');
-  
-  await mongoose.connect(MONGO_URI, {
-    serverSelectionTimeoutMS: 10000,
-    socketTimeoutMS: 45000
-  });
-  
-  importLogger.info('Connecting to MongoDB...');
-  console.log('  ✅ Connected to MongoDB\n');
-  
-  await importDrivers();
-  await importConstructors();
-  await importCircuits();
-  await importRaces();
-  await importResults();
-  await importDriverStandings();
-  
-  await mongoose.connection.close();
-  importLogger.info('✅ All data imported successfully!');
-  
-  process.exit(0);
-}
-
-run();
-```
-
----
-
-## How It Was Made
-
-This section provides a step-by-step guide on how the F1 application was developed.
-
-### Step 1: Project Setup and Initialization
-
-First, create the project directory structure:
-
-```bash
-mkdir f1-project
-cd f1-project
-mkdir -p backend/models backend/import backend/utils backend/utils/logs frontend/src
-mkdir -p archive images/cars images/logos
-```
-
-Initialize the Node.js backend:
-
-```bash
-cd backend
-npm init -y
-npm install express mongoose cors morgan csvtojson
-```
-
-### Step 2: Design Database Models
-
-Create Mongoose schemas for each data entity:
-
-1. **Driver** - stores driver information
-2. **Constructor** - stores team information
-3. **Circuit** - stores track information
-4. **Race** - stores race event details
-5. **Result** - stores race results
-6. **DriverStanding** - stores championship positions
-
-### Step 3: Build the Express Server
-
-Create `server.js` with:
-- Express app setup with middleware (cors, express.json, morgan)
-- MongoDB connection with Mongoose
-- Request logging middleware
-- Error handling middleware
-- API endpoints for all data types
-- Health check and info endpoints
-
-### Step 4: Create CSV Import Utility
-
-Build the import script to:
-- Read CSV files from the archive directory
-- Convert CSV data to JSON using csvtojson
-- Transform data (handle `\N` null values, parse dates/numbers)
-- Batch insert large datasets
-- Track import statistics
-
-### Step 5: Set Up Logging
-
-Configure Winston loggers:
-- `logger` - general application logs
-- `apiLogger` - HTTP request logs
-- `dbLogger` - database connection logs
-- `importLogger` - CSV import progress logs
-
-### Step 6: Acquire and Prepare Data
-
-Obtain F1 CSV data from public datasets (e.g., Ergast API), place in `archive/` folder with files:
-- drivers.csv
-- constructors.csv
-- circuits.csv
-- races.csv
-- results.csv
-- driver_standings.csv
-- constructor_standings.csv
-- etc.
-
-### Step 7: Build the Angular Frontend
-
-Create Angular project:
+### Frontend
 
 ```bash
 cd frontend
-ng new f1-frontend
+npm install
 npm start
 ```
 
-Build components for:
-- Driver listing
-- Constructor listing
-- Race schedule
-- Results display
-- Championship standings
+Open `http://localhost:4200`. The dev server serves the archive CSVs and local images from `src/assets`.
 
-### Step 8: Connect Frontend to Backend
-
-Update Angular services to call the REST API:
-
-```typescript
-@Injectable({ providedIn: 'root' })
-export class F1ApiService {
-  private apiUrl = 'http://localhost:3000/api';
-
-  getDrivers(): Observable<Driver[]> {
-    return this.http.get<Driver[]>(`${this.apiUrl}/drivers`);
-  }
-
-  getRaces(year?: number): Observable<Race[]> {
-    return this.http.get<Race[]>(`${this.apiUrl}/races`, { 
-      params: { year: year.toString() } 
-    });
-  }
-}
-```
-
-### Step 9: Test and Debug
-
-Run the server:
-```bash
-npm start
-```
-
-Import data:
-```bash
-npm run import
-```
-
-Test API endpoints with curl or Postman:
-```bash
-curl http://localhost:3000/api/drivers
-curl http://localhost:3000/api/latest-results
-```
-
-### Step 10: Production Build
-
-Build the frontend for production:
+### Production preview
 
 ```bash
+cd frontend
+npm run build
+npx http-server dist/frontend/browser -p 8080 -c-1
+```
+
+Any static host works; configure an SPA fallback so deep links such as `/races/202618` resolve to `index.html`.
+
+### Root convenience scripts
+
+```bash
+npm run frontend     # Angular dev server
+npm run build        # production build
+npm run data:prune   # rebuild the 2000–2024 base archive
+npm run data:sync    # append 2025–2026 from Jolpica
+npm run data:build   # prune, then sync (full archive refresh)
+npm run assets:fetch # refresh logos, circuit maps, photos + manifest
+npm run outlines:build # regenerate the circuit-outline set
+npm run docs:build   # rebuild README.docx (Python + python-docx)
+npm run deck:build   # rebuild the presentation (Python + python-pptx)
+```
+
+---
+
+## Scripts
+
+| Command | What it does |
+|---|---|
+| `node scripts/prune-archive.mjs` | Reads the full `archive/`, keeps rows from 2000 onward, rebuilds season standings, writes `meta.json`, and reports file sizes. Existing untouched archive files are never deleted from the source folder. |
+| `node scripts/sync-current-season.mjs` | Fetches 2025–2026 seasons, results, qualifying and standings from Jolpica (paginating at 100 rows), synthesises race IDs and rewrites `meta.json`. Must run after the prune. |
+| `node scripts/fetch-assets.mjs` | Downloads team logos, official circuit maps, OpenF1 driver headshots and Wikimedia archive photos; writes `asset-manifest.ts` with the files that actually exist and their credits. Skips existing files and backs off on HTTP 429. |
+| `node scripts/extract-circuit-outlines.mjs` | Traces circuit map images into the stroke-only SVG paths used by the floating background layer. |
+| `python scripts/build-docs.py` | Renders `README.md` into a styled `README.docx` with a cover, credits page, contents and screenshots. Requires `python-docx`. |
+| `python scripts/build-deck.py` | Builds the 15-slide presentation as `f1-presentation.pptx`. Requires `python-pptx`. |
+| `npm run build` (root) | Runs the production Angular build. |
+| `npm run start` (root) | Starts the optional legacy Express server. |
+
+---
+
+## OpenF1 live timing and tokens
+
+The `/live` page is a full session replay for historical data and an optional live poller for current sessions.
+
+1. Pick a season, meeting and session. The selection is mirrored into the URL (`?year=…&session=…`) with `replaceUrl`, so links are shareable and the back button does not loop.
+2. The timing tower combines positions, intervals, laps, stints, pit stops, weather, race control and the final classification. Missing fields render as dashes rather than breaking the table.
+3. Choose a driver and lap to fetch a windowed telemetry trace (speed, gear, DRS, top/average speed, gear changes).
+4. Real-time polling is **off by default**. Add an OpenF1 bearer token in the token panel to enable 15-second refresh. The token is stored in `localStorage` under `paddock.openf1.token`, sent only to `api.openf1.org`, and never committed.
+5. `paddock.openf1.polling` remembers whether polling was left enabled.
+
+The free tier covers historical sessions; true real-time access requires a paid OpenF1 subscription. Without a token the page remains a fully functional replay.
+
+---
+
+## Data pipeline
+
+```text
+Ergast-style archive (1950–2024)
+        │
+        ├── scripts/prune-archive.mjs
+        │       ├── keep 2000–2024 rows
+        │       ├── rebuild season standings from results
+        │       └── write frontend/src/assets/archive/*
+        │
+Jolpica (2025 → 26 Oct 2026)
+        │
+        └── scripts/sync-current-season.mjs
+                ├── append races, results, qualifying, standings
+                ├── paginate at 100 rows per request
+                ├── synthesise race IDs (year * 100 + round)
+                └── update meta.json (completeYears, currentYear)
+
+        └── frontend CSVDataService
+                ├── index rows once
+                ├── derive careers / champions / rivalries
+                ├── resolve complete vs in-progress seasons
+                └── shareReplay caches
+
+OpenF1 (2023 → today)
+        └── OpenF1Service
+                ├── token bucket + response cache
+                ├── session replay board
+                └── windowed per-lap telemetry
+```
+
+To change the scope, edit `DATA_START_YEAR`, `ARCHIVE_END_YEAR` and `OPENF1_START_YEAR` in `frontend/src/app/core/config/data.config.ts`, then rerun `npm run data:build`.
+
+---
+
+## Design system
+
+- **One theme, no toggle.** Silver is the only surface language. There is no dark mode, no glass, no glow and no gradient wash.
+- **Tokens:** `styles/_tokens.scss` defines the silver scale, ink scale, one red accent (`#e10600`), 2–4 px radii and one soft shadow. Components never hard-code surface colours.
+- **Surfaces:** every page uses the same `.panel` primitive — flat matte silver, hairline border, tiny radius. Brushed metal is reserved for the home hero plate and the navbar.
+- **Typography:** Titillium Web for UI and headlines, Source Serif 4 for article body, tabular numerals for timing and points.
+- **Red as a signal:** the F1 mark, the active nav rule, P1 rows and one primary action per view. Team colours appear only in data bars, badges and 2 px rules — never as backgrounds.
+- **Background:** `TrackBackgroundComponent` floats thirty distinct, stroke-only circuit outlines in black ink at a uniform 20%, one of every generated circuit. They sit on a loose 6×5 staggered field that spans the full viewport, with alternating rows offset so no columns line up; sizes stay between 125 and 195 px and rotations between −35° and +35°. There is no corner mask, so the top-left carries the same weight as the bottom-right. Each track drifts 5–9 px and rocks 2–4° on its own 40–80 s loop; the field rebuilds to twenty shapes in five columns at 1400 px and ten in two columns at 760 px, and stops animating under `prefers-reduced-motion`.
+- **Motion:** short eased entrances and a restrained live indicator; all motion respects `prefers-reduced-motion`.
+- **Imagery:** `DriverAvatar` and `TeamBadge` read the generated manifest, lazy-load images and fall back to monograms or typographic crests.
+
+---
+
+## Imagery and licensing
+
+`scripts/fetch-assets.mjs` builds `frontend/src/app/core/config/asset-manifest.ts`, which lists only the files that exist on disk. Components consult it before requesting an image, so a missing asset never produces a broken image.
+
+| Set | Count | Source | Fallback |
+|---|---|---|---|
+| Team logos | 35 of 40 | Formula 1 media CDN | Typographic crest |
+| Circuit maps | 39 of 39 | Formula 1 media CDN | Country flag |
+| Driver portraits | 28 | OpenF1 | Monogram |
+| Archive photos | 9 | Wikimedia Commons (CC/PD) | Caption only |
+| F1 mark | 1 | Formula 1 | — |
+
+The five teams without a licensable mark are MF1, Spyker MF1, Jaguar, Lotus Racing and Marussia. The 2026 grid includes the new Audi and Cadillac entries.
+
+All sources and licences are listed in-app on `/credits`. Formula 1, F1, the F1 logo, team marks and circuit names are trademarks of Formula One Licensing B.V., the FIA and the respective teams; they appear for identification and commentary only. This is an unofficial, non-commercial student project.
+
+---
+
+## Performance and accessibility
+
+- Route-level code splitting; the production initial bundle is about **580 kB raw / 154 kB transferred**.
+- Archive data is fetched once and indexed; no per-page CSV downloads.
+- OpenF1 cache prevents duplicate calls; the token bucket keeps the app under the 3 req/s limit.
+- Semantic headings, tables with captions, labelled controls, visible focus, keyboard-operable navigation, `aria-selected` on tabs and an `sr-only` utility.
+- Silver-on-ink text meets readable contrast; reduced motion and reduced transparency are handled in CSS.
+
+---
+
+## Production build
+
+```bash
+cd frontend
 npm run build
 ```
 
-Set environment:
+Output: `frontend/dist/frontend/browser/`.
 
-```bash
-NODE_ENV=production npm start
-```
+Current build characteristics:
 
----
+- Initial: ~580 kB raw, ~154 kB transferred
+- Lazy chunks: under 45 kB each (live timing is the largest)
+- Budgets in `angular.json`: 1.5 MB warning / 2.5 MB error initial; 24 kB warning / 40 kB error per component style
 
-## Getting Started
-
-### Prerequisites
-
-- Node.js (v14+)
-- MongoDB (v4+)
-- npm or yarn
-
-### Installation
-
-1. **Clone the repository**
-
-2. **Install backend dependencies**
-   ```bash
-   cd backend
-   npm install
-   ```
-
-3. **Configure MongoDB**
-   - Ensure MongoDB is running locally on `localhost:27017`
-   - Or set `MONGO_URI` environment variable
-
-4. **Import the data**
-   ```bash
-   npm run import
-   ```
-
-5. **Start the server**
-   ```bash
-   npm start
-   ```
-
-### Run Frontend (Development)
-
-```bash
-cd frontend
-npm start
-```
-
-Visit `http://localhost:4200`
-
-### Available Scripts
-
-| Command | Description |
-|---------|-------------|
-| `npm start` | Start the backend server |
-| `npm run import` | Import CSV data to MongoDB |
-| `npm run frontend` | Start Angular dev server |
-| `npm run build` | Build Angular for production |
+Deploy the `browser` folder to any static host (Netlify, Vercel, GitHub Pages, S3, Nginx) with an SPA fallback to `index.html`.
 
 ---
 
-## Future Enhancements
+## Optional legacy backend
 
-- [ ] User authentication and authorization
-- [ ] Race simulation feature
-- [ ] Driver and constructor comparisons
-- [ ] Interactive circuit visualization
-- [ ] Real-time race updates via WebSocket
-- [ ] Mobile-responsive design
-- [ ] Driver career statistics charts
-- [ ] Constructor championship standings
-- [ ] Lap time analysis
-- [ ] Pit stop analytics
+The repository still contains the original Express + MongoDB API (`backend/`) and the full untrimmed dataset (`archive/`). The redesigned frontend does **not** call it at runtime; it is kept for reference and for anyone who wants a server-side API.
+
+```bash
+npm install
+cd backend && npm install
+npm run import   # requires MongoDB on localhost:27017
+npm start        # http://localhost:3000
+```
+
+Endpoints include `/api/health`, `/api/drivers`, `/api/races`, `/api/results/:raceId`, `/api/latest-results` and `/api/standings/:year`.
+
+---
+
+## Limitations and next steps
+
+- **2026 is in progress.** 18 of 23 rounds are complete as of 26 October 2026. The app labels the current leader as a leader and lists no 2026 champion.
+- The 2026 calendar has unusual entries: Sakhir and Jeddah were cancelled, Sepang hosts the Bahrain Grand Prix in Malaysia, and Madrid uses the `madring` circuit reference.
+- Driver portraits are only available for drivers OpenF1 lists from 2023 onward; earlier drivers intentionally use monograms. Arvid Lindblad has no portrait yet.
+- True real-time polling requires an OpenF1 paid token.
+- Possible extensions: sprint results in the archive, saved favourite drivers, deeper stint/tyre analytics and a server-side cache for OpenF1.
 
 ---
 
 ## License
 
-This project is for educational purposes (FET Subject).
+Educational project for the FET subject. Formula 1 data belongs to its respective owners; OpenF1 is used under its public API terms.
 
 ---
 
-**Built with ❤️ using Angular, Node.js, Express, and MongoDB**
+**Built with Angular, Material 3, a lot of SCSS, and an unreasonable amount of Formula 1 data.**

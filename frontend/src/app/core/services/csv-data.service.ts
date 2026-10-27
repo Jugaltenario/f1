@@ -1,613 +1,824 @@
-import { Injectable, inject, signal, computed, isDevMode, NgZone } from '@angular/core';
-import { HttpClient, HttpErrorResponse } from '@angular/common/http';
+import { Injectable, inject, signal } from '@angular/core';
+import { HttpClient } from '@angular/common/http';
 import { Papa } from 'ngx-papaparse';
-import { Observable, map, catchError, of, forkJoin, tap, finalize } from 'rxjs';
-import {
-  Driver, Season, Race, Result, Constructor,
-  DriverStanding, Qualifying, ChampionshipStanding, RivalryData, SeasonStanding
-} from '../models/driver.model';
+import { Observable, forkJoin, of, map, shareReplay, catchError, tap, finalize } from 'rxjs';
 
-export interface LogEntry {
-  timestamp: string;
-  level: 'info' | 'warn' | 'error' | 'debug';
-  message: string;
-  context?: string;
-  data?: any;
+import {
+  ArchiveMeta,
+  ChampionRow,
+  Circuit,
+  CircuitCareer,
+  Constructor,
+  ConstructorCareer,
+  Driver,
+  DriverCareer,
+  DriverSeasonRow,
+  EnrichedResult,
+  Qualifying,
+  Race,
+  RaceWithResults,
+  Result,
+  RivalryData,
+  SeasonConstructorStanding,
+  SeasonStanding,
+  SeasonSummary,
+  StandingsRow,
+  Status,
+} from '../models/driver.model';
+import { ARCHIVE_END_YEAR, teamColor as teamColorFor } from '../config/data.config';
+import { colorFromId, hexAlpha } from '../utils/format';
+
+const ARCHIVE = '/assets/archive/';
+
+interface CoreData {
+  meta: ArchiveMeta | null;
+  drivers: Driver[];
+  driverById: Map<number, Driver>;
+  constructors: Constructor[];
+  constructorById: Map<number, Constructor>;
+  circuits: Circuit[];
+  circuitById: Map<number, Circuit>;
+  races: Race[];
+  raceById: Map<number, Race>;
+  yearOfRace: Map<number, number>;
+  results: Result[];
+  resultsByRace: Map<number, Result[]>;
+  resultsByDriver: Map<number, Result[]>;
+  qualifying: Qualifying[];
+  qualifyingByRace: Map<number, Qualifying[]>;
+  qualifyingByDriver: Map<number, Qualifying[]>;
+  standings: SeasonStanding[];
+  standingsByDriver: Map<number, SeasonStanding[]>;
+  constructorStandings: SeasonConstructorStanding[];
+  constructorStandingsByConstructor: Map<number, SeasonConstructorStanding[]>;
+  statusById: Map<number, string>;
+  driverCareers: DriverCareer[];
+  constructorCareers: ConstructorCareer[];
+  circuitCareers: CircuitCareer[];
+  /** Most recent race that actually has results. */
+  latestRace: Race | null;
+  /** Next race on the calendar without results, if any. */
+  nextRace: Race | null;
+  roundsByYear: Map<number, Race[]>;
+  completeYears: Set<number>;
 }
 
 @Injectable({ providedIn: 'root' })
 export class CSVDataService {
   private http = inject(HttpClient);
-  private papa = new Papa();
-  private zone = inject(NgZone);
+  private papa = inject(Papa);
 
-  private archivePath = '/assets/archive/';  
-  private logBuffer: LogEntry[] = [];
-  private readonly MAX_LOG_BUFFER = 100;
-  
-  // Cache to avoid multiple HTTP requests
-  private cache = new Map<string, any>();
-  private cachePromises = new Map<string, Observable<any>>();
+  readonly loading = signal(true);
+  readonly error = signal<string | null>(null);
 
-  private log(level: LogEntry['level'], message: string, context?: string, data?: any) {
-    const entry: LogEntry = {
-      timestamp: new Date().toISOString(),
-      level,
-      message,
-      context,
-      data
-    };
-    
-    this.logBuffer.push(entry);
-    if (this.logBuffer.length > this.MAX_LOG_BUFFER) {
-      this.logBuffer.shift();
-    }
+  private cache = new Map<string, Observable<unknown[]>>();
 
-    const prefix = `[${entry.timestamp}] [${level.toUpperCase().padEnd(5)}]`;
-    const contextStr = context ? ` [${context}]` : '';
+  /** The whole archive, parsed and indexed exactly once. */
+  private core$: Observable<CoreData> = forkJoin({
+    meta: this.loadJson<ArchiveMeta>('meta.json'),
+    drivers: this.load('drivers.csv'),
+    constructors: this.load('constructors.csv'),
+    circuits: this.load('circuits.csv'),
+    races: this.load('races.csv'),
+    results: this.load('results.csv'),
+    qualifying: this.load('qualifying.csv'),
+    status: this.load('status.csv'),
+    standings: this.load('season_standings.csv'),
+    constructorStandings: this.load('season_constructor_standings.csv'),
+  }).pipe(
+    map((raw) => this.build(raw as never)),
+    tap((core) => {
+      this.loading.set(false);
+      this.error.set(null);
+      if (typeof console !== 'undefined') {
+        console.info(
+          `[archive] ${core.driverCareers.length} drivers · ${core.constructorCareers.length} teams · ` +
+            `${core.races.length} races · ${core.results.length} results`,
+        );
+      }
+    }),
+    catchError((err) => {
+      this.loading.set(false);
+      this.error.set(err?.message ?? 'Unable to load the archive');
+      console.error('[archive] failed to load', err);
+      return of(this.buildEmpty());
+    }),
+    shareReplay({ bufferSize: 1, refCount: false }),
+  );
 
-    switch (level) {
-      case 'error':
-        console.error(`${prefix}${contextStr} ${message}`, data || '');
-        break;
-      case 'warn':
-        console.warn(`${prefix}${contextStr} ${message}`, data || '');
-        break;
-      case 'debug':
-        if (isDevMode()) {
-          console.debug(`${prefix}${contextStr} ${message}`, data || '');
-        }
-        break;
-      default:
-        console.log(`${prefix}${contextStr} ${message}`, data || '');
-    }
+  // -------------------------------------------------------------------------
+  // Public reads
+  // -------------------------------------------------------------------------
+  getMeta(): Observable<ArchiveMeta | null> {
+    return this.core$.pipe(map((core) => core.meta));
   }
 
-  getLogs(): LogEntry[] {
-    return [...this.logBuffer];
+  getDrivers(): Observable<DriverCareer[]> {
+    return this.core$.pipe(map((core) => core.driverCareers));
   }
 
-  clearLogs(): void {
-    this.logBuffer = [];
-    this.log('info', 'Log buffer cleared', 'CSVDataService');
-  }
-
-  private logRequest(path: string, method: string = 'GET') {
-    this.log('debug', `HTTP ${method} request: ${path}`, 'CSVDataService');
-  }
-
-  private logResponse(path: string, status: 'success' | 'error', data?: any, error?: any) {
-    if (status === 'success') {
-      const count = Array.isArray(data) ? data.length : (data ? 1 : 0);
-      this.log('info', `HTTP success: ${path} (${count} items)`, 'CSVDataService', { count });
-    } else {
-      this.log('error', `HTTP error: ${path}`, 'CSVDataService', { error: error?.message || error });
-    }
-  }
-
-  getDrivers(): Observable<Driver[]> {
-    const path = `${this.archivePath}drivers.csv`;
-    this.logRequest(path);
-    
-    return this.parseCSV<any>(path, 'Drivers').pipe(
-      tap({
-        next: (data) => this.logResponse(path, 'success', data),
-        error: (err) => this.logResponse(path, 'error', null, err)
-      }),
-      map(rows => {
-        const drivers: Driver[] = rows.map((row: any) => ({
-          ...row,
-          id: row.driverId || 0,
-          driverId: row.driverId,
-          number: row.number === '\\N' ? null : String(row.number),
-          code: row.code || null,
-          forename: row.forename || '',
-          surname: row.surname || '',
-          driverRef: row.driverRef || '',
-          nationality: row.nationality || '',
-          dob: row.dob || null,
-          url: row.url || ''
-        }));
-        
-        this.log('debug', `Parsed ${drivers.length} drivers`, 'CSVDataService');
-        return drivers;
-      }),
-      catchError(err => {
-        this.log('error', 'Failed to load drivers', 'CSVDataService', { error: err.message || err });
-        return of([]);
-      })
+  getDriver(driverId: number): Observable<DriverCareer | null> {
+    return this.core$.pipe(
+      map((core) => core.driverCareers.find((driver) => driver.driverId === driverId) ?? null),
     );
   }
 
-  getSeasons(): Observable<Season[]> {
-    const path = `${this.archivePath}seasons.csv`;
-    this.logRequest(path);
-    
-    return this.parseCSV<Season>(path, 'Seasons').pipe(
-      tap({
-        next: (data) => this.logResponse(path, 'success', data),
-        error: (err) => this.logResponse(path, 'error', null, err)
-      }),
-      catchError(err => {
-        this.log('error', 'Failed to load seasons', 'CSVDataService', { error: err.message || err });
-        return of([]);
-      })
-    );
+  getConstructors(): Observable<ConstructorCareer[]> {
+    return this.core$.pipe(map((core) => core.constructorCareers));
+  }
+
+  getCircuits(): Observable<CircuitCareer[]> {
+    return this.core$.pipe(map((core) => core.circuitCareers));
   }
 
   getRaces(year?: number): Observable<Race[]> {
-    const path = `${this.archivePath}races.csv`;
-    this.logRequest(path);
-    
-    return this.parseCSV<Race>(path, 'Races').pipe(
-      map(races => year ? races.filter(r => r.year === year) : races),
-      tap({
-        next: (data) => this.logResponse(path, 'success', data),
-        error: (err) => this.logResponse(path, 'error', null, err)
-      }),
-      catchError(err => {
-        this.log('error', 'Failed to load races', 'CSVDataService', { error: err.message || err });
-        return of([]);
-      })
+    return this.core$.pipe(
+      map((core) =>
+        (year ? core.races.filter((race) => race.year === year) : core.races)
+          .slice()
+          .sort((a, b) => b.year - a.year || a.round - b.round),
+      ),
     );
   }
 
-  getLatestResults(): Observable<{ race: Race; results: (Result & { driver?: Driver; constructor?: Constructor })[] }> {
-    this.log('info', 'Loading latest results...', 'CSVDataService');
-    
-    return forkJoin({
-      races: this.getRaces(),
-      results: this.getResults(),
-      drivers: this.getDrivers(),
-      constructors: this.getConstructors()
-    }).pipe(
-      map(({ races, results, drivers, constructors }) => {
-        const latestRace = races.reduce((latest, race) => {
-          return new Date(race.date) > new Date(latest.date) ? race : latest;
-        }, races[0]);
-        
-        if (!latestRace) {
-          return { race: null as any, results: [] };
+  getSeasons(): Observable<number[]> {
+    return this.core$.pipe(
+      map((core) => [...new Set(core.races.map((race) => race.year))].sort((a, b) => b - a)),
+    );
+  }
+
+  getSeasonStandings(year: number): Observable<StandingsRow[]> {
+    return this.core$.pipe(
+      map((core) =>
+        core.standings
+          .filter((row) => row.year === year)
+          .sort((a, b) => a.position - b.position)
+          .map((row) => {
+            const driver = core.driverById.get(row.driverId);
+            const constructor = core.constructorById.get(row.constructorId);
+            return {
+              position: row.position,
+              points: row.points,
+              wins: row.wins,
+              driver,
+              constructor,
+              teamColor: teamColorFor(constructor?.constructorRef),
+            };
+          }),
+      ),
+    );
+  }
+
+  getConstructorStandings(year: number): Observable<(SeasonConstructorStanding & { constructor?: Constructor; color: string })[]> {
+    return this.core$.pipe(
+      map((core) =>
+        core.constructorStandings
+          .filter((row) => row.year === year)
+          .sort((a, b) => a.position - b.position)
+          .map((row) => {
+            const constructor = core.constructorById.get(row.constructorId);
+            return { ...row, constructor, color: teamColorFor(constructor?.constructorRef) };
+          }),
+      ),
+    );
+  }
+
+  getRace(raceId: number): Observable<RaceWithResults | null> {
+    return this.core$.pipe(map((core) => this.buildRace(core, raceId)));
+  }
+
+  getLatestRace(): Observable<RaceWithResults | null> {
+    return this.core$.pipe(map((core) => (core.latestRace ? this.buildRace(core, core.latestRace.raceId) : null)));
+  }
+
+  /**
+   * Calendar + championship state for one season. The live season reports its
+   * leader and how many rounds remain; it never reports a champion.
+   */
+  getSeasonSummary(year: number): Observable<SeasonSummary> {
+    return this.core$.pipe(map((core) => this.buildSeasonSummary(core, year)));
+  }
+
+  getCurrentSeason(): Observable<SeasonSummary> {
+    return this.core$.pipe(map((core) => this.buildSeasonSummary(core, core.meta?.endYear ?? ARCHIVE_END_YEAR)));
+  }
+
+  getDriverSeasons(driverId: number): Observable<DriverSeasonRow[]> {
+    return this.core$.pipe(map((core) => this.buildDriverSeasons(core, driverId)));
+  }
+
+  getRivalry(driver1Id: number, driver2Id: number): Observable<{ driver1: RivalryData; driver2: RivalryData }> {
+    return this.core$.pipe(
+      map((core) => ({
+        driver1: this.buildRivalry(core, driver1Id),
+        driver2: this.buildRivalry(core, driver2Id),
+      })),
+    );
+  }
+
+  getChampions(): Observable<ChampionRow[]> {
+    return this.core$.pipe(
+      map((core) => {
+        const rows: ChampionRow[] = [];
+        for (const standing of core.standings) {
+          if (standing.position !== 1) continue;
+          // The in-progress season has a leader, not a champion.
+          if (!core.completeYears.has(standing.year)) continue;
+          const constructor = core.constructorById.get(standing.constructorId);
+          rows.push({
+            year: standing.year,
+            driver: core.driverById.get(standing.driverId) ?? null,
+            constructor: constructor ?? null,
+            teamColor: teamColorFor(constructor?.constructorRef),
+            points: standing.points,
+            wins: standing.wins,
+          });
         }
-        
-        const raceResults = results
-          .filter(r => r.raceId === latestRace.raceId)
-          .sort((a: any, b: any) => a.positionOrder - b.positionOrder);
-        
-        const populatedResults = raceResults.map((result: any) => {
-          const driver = drivers.find(d => d.driverId === result.driverId);
-          const constructor = constructors.find(c => c.constructorId === result.constructorId);
-          return { ...result, driver, constructor };
-        });
-        
-        return { race: latestRace, results: populatedResults };
+        return rows.sort((a, b) => b.year - a.year);
       }),
-      catchError(err => {
-        this.log('error', 'Failed to load latest results', 'CSVDataService', { error: err.message || err });
-        return of({ race: null as any, results: [] });
-      })
     );
   }
 
-  getChampions(): Observable<{ year: number; standings: any[] }> {
-    this.log('info', 'Loading champions...', 'CSVDataService');
-    
-    return forkJoin({
-      races: this.getRaces(),
-      standings: this.getDriverStandings(),
-      drivers: this.getDrivers()
-    }).pipe(
-      map(({ races, standings, drivers }) => {
-        const latestRace = races.reduce((latest, race) => {
-          return new Date(race.date) > new Date(latest.date) ? race : latest;
-        }, races[0]);
-        
-        if (!latestRace) {
-          return { year: new Date().getFullYear(), standings: [] };
-        }
-        
-        const year = latestRace.year;
-        const latestStandings = standings
-          .filter(s => s.raceId === latestRace.raceId)
-          .sort((a: any, b: any) => a.position - b.position)
-          .slice(0, 10);
-        
-        const populatedStandings = latestStandings.map((standing: any) => {
-          const driver = drivers.find(d => d.driverId === standing.driverId);
-          return { ...standing, driver };
-        });
-        
-        return { year, standings: populatedStandings };
-      }),
-      catchError(err => {
-        this.log('error', 'Failed to load champions', 'CSVDataService', { error: err.message || err });
-        return of({ year: new Date().getFullYear(), standings: [] });
-      })
-    );
-  }
-
-  getResults(): Observable<Result[]> {
-    const path = `${this.archivePath}results.csv`;
-    this.logRequest(path);
-    
-    return this.parseCSV<any>(path, 'Results').pipe(
-      tap({
-        next: (data) => this.logResponse(path, 'success', data),
-        error: (err) => this.logResponse(path, 'error', null, err)
-      }),
-      map(rows => {
-        const results = rows.map((row: any) => ({
-          ...row,
-          number: row.number === '\\N' ? null : String(row.number)
-        }));
-        
-        this.log('debug', `Parsed ${results.length} results`, 'CSVDataService');
-        return results;
-      }),
-      catchError(err => {
-        this.log('error', 'Failed to load results', 'CSVDataService', { error: err.message || err });
-        return of([]);
-      })
-    );
-  }
-
-  getConstructors(): Observable<Constructor[]> {
-    const path = `${this.archivePath}constructors.csv`;
-    this.logRequest(path);
-    
-    return this.parseCSV<Constructor>(path, 'Constructors').pipe(
-      tap({
-        next: (data) => this.logResponse(path, 'success', data),
-        error: (err) => this.logResponse(path, 'error', null, err)
-      }),
-      catchError(err => {
-        this.log('error', 'Failed to load constructors', 'CSVDataService', { error: err.message || err });
-        return of([]);
-      })
-    );
-  }
-
-  getDriverStandings(): Observable<DriverStanding[]> {
-    const path = `${this.archivePath}driver_standings.csv`;
-    this.logRequest(path);
-    
-    return this.parseCSV<DriverStanding>(path, 'DriverStandings').pipe(
-      tap({
-        next: (data) => this.logResponse(path, 'success', data),
-        error: (err) => this.logResponse(path, 'error', null, err)
-      }),
-      catchError(err => {
-        this.log('error', 'Failed to load driver standings', 'CSVDataService', { error: err.message || err });
-        return of([]);
-      })
-    );
-  }
-
-  getQualifying(): Observable<Qualifying[]> {
-    const path = `${this.archivePath}qualifying.csv`;
-    this.logRequest(path);
-    
-    return this.parseCSV<Qualifying>(path, 'Qualifying').pipe(
-      tap({
-        next: (data) => this.logResponse(path, 'success', data),
-        error: (err) => this.logResponse(path, 'error', null, err)
-      }),
-      catchError(err => {
-        this.log('error', 'Failed to load qualifying', 'CSVDataService', { error: err.message || err });
-        return of([]);
-      })
-    );
-  }
-
-  getCircuits(): Observable<any[]> {
-    const path = `${this.archivePath}circuits.csv`;
-    this.logRequest(path);
-    
-    return this.parseCSV<any>(path, 'Circuits').pipe(
-      tap({
-        next: (data) => this.logResponse(path, 'success', data),
-        error: (err) => this.logResponse(path, 'error', null, err)
-      }),
-      catchError(err => {
-        this.log('error', 'Failed to load circuits', 'CSVDataService', { error: err.message || err });
-        return of([]);
-      })
-    );
-  }
-
-  getDriverStats(): Observable<Driver[]> {
-    this.log('info', 'Loading driver stats (all data merge)...', 'CSVDataService');
-    const startTime = Date.now();
-
-    return forkJoin({
-      drivers: this.getDrivers(),
-      results: this.getResults(),
-      races: this.getRaces(),
-      standings: this.getDriverStandings(),
-      qualifying: this.getQualifying()
-    }).pipe(
-      map(({ drivers, results, races, standings, qualifying }) => {
-        const raceMap = new Map(races.map(r => [r.raceId, r]));
-        
-        const processedDrivers = drivers.map(driver => {
-          const driverId = driver.driverId;
-          const driverResults = results.filter(r => r.driverId === driverId);
-          const driverRaces = races.filter(r => r.year >= 2009);
-          
-          const firstRace = driverRaces.find(r => 
-            driverResults.some(dr => dr.raceId === r.raceId)
-          );
-          
-          return {
-            ...driver,
-            debutYear: firstRace?.year || driverRaces[0]?.year,
-            wins: driverResults.filter(r => r.position === 1).length,
-            podiums: driverResults.filter(r => r.position && r.position <= 3).length,
-            championships: new Set(driverResults.map(r => raceMap.get(r.raceId)?.year).filter(Boolean)).size
-          };
-        });
-
-        const qualifyingPolePositions = new Map<number, number>();
-        qualifying.forEach(q => {
-          if (q.driverId && q.position === 1) {
-            qualifyingPolePositions.set(q.driverId, (qualifyingPolePositions.get(q.driverId) || 0) + 1);
-          }
-        });
-
-        processedDrivers.forEach(driver => {
-          const driverId = driver.driverId || 0;
-          const poles = qualifyingPolePositions.get(driverId);
-          if (poles) {
-            (driver as any).poles = poles;
-          }
-        });
-
-        const duration = Date.now() - startTime;
-        this.log('info', `Driver stats computed: ${processedDrivers.length} drivers in ${duration}ms`, 'CSVDataService', {
-          drivers: processedDrivers.length,
-          results: results.length,
-          races: races.length,
-          qualifying: qualifying.length,
-          duration: `${duration}ms`
-        });
-
-        return processedDrivers;
-      }),
-      catchError(err => {
-        this.log('error', 'Failed to load driver stats', 'CSVDataService', { error: err.message || err, stack: err.stack });
-        return of([]);
-      })
-    );
-  }
-
-  getRivalryData(driver1Id: number, driver2Id: number): Observable<{ driver1: RivalryData; driver2: RivalryData } | null> {
-    this.log('info', `Computing rivalry data: Driver ${driver1Id} vs Driver ${driver2Id}`, 'CSVDataService');
-    const startTime = Date.now();
-
-    return forkJoin({
-      drivers: this.getDrivers(),
-      results: this.getResults(),
-      races: this.getRaces(),
-      standings: this.getDriverStandings(),
-      qualifying: this.getQualifying()
-    }).pipe(
-      map(({ drivers, results, races, standings, qualifying }) => {
-        const raceMap = new Map(races.map(r => [r.raceId, r]));
-        
-        const buildRivalryData = (driverId: number): RivalryData => {
-          const driver = drivers.find(d => d.driverId === driverId);
-          const driverResults = results.filter(r => r.driverId === driverId);
-          const driverQualifying = qualifying.filter(q => q.driverId === driverId);
-          
-          const yearlyStats = new Map<number, SeasonStanding>();
-          
-          driverResults.forEach(result => {
-            const race = raceMap.get(result.raceId);
-            if (!race) return;
-            
-            if (!yearlyStats.has(race.year)) {
-              yearlyStats.set(race.year, {
-                year: race.year,
-                position: 0,
-                points: 0,
-                wins: 0,
-                podiums: 0,
-                poles: 0
-              });
-            }
-            
-            const stat = yearlyStats.get(race.year)!;
-            stat.points += result.points || 0;
-            if (result.position === 1) stat.wins++;
-            if (result.position && result.position <= 3) stat.podiums++;
-          });
-
-          driverQualifying.forEach(q => {
-            const race = raceMap.get(q.raceId);
-            if (!race) return;
-            
-            const stat = yearlyStats.get(race.year);
-            if (stat && q.position === 1) stat.poles++;
-          });
-
-          standings.forEach(s => {
-            const race = raceMap.get(s.raceId);
-            if (!race || s.driverId !== driverId) return;
-            
-            const stat = yearlyStats.get(race.year);
-            if (stat) stat.position = s.position;
-          });
-
-          const sortedYears = Array.from(yearlyStats.values()).sort((a, b) => a.year - b.year);
-          
-          return {
-            driverId,
-            driverName: driver ? `${driver.forename} ${driver.surname}` : 'Unknown',
-            standings: sortedYears
-          };
-        };
-
-        const data = {
-          driver1: buildRivalryData(driver1Id),
-          driver2: buildRivalryData(driver2Id)
-        };
-
-        const duration = Date.now() - startTime;
-        this.log('info', `Rivalry data computed in ${duration}ms`, 'CSVDataService', {
-          driver1: data.driver1.driverName,
-          driver2: data.driver2.driverName,
-          seasons: data.driver1.standings.length + data.driver2.standings.length,
-          duration: `${duration}ms`
-        });
-
-        return data;
-      }),
-      tap({
-        error: (err) => this.log('error', 'Failed to compute rivalry data', 'CSVDataService', { 
-          error: err.message || err,
-          driver1Id,
-          driver2Id
-        })
-      }),
-      catchError(err => {
-        this.log('error', 'Rivalry computation failed', 'CSVDataService', { 
-          error: err.message || err,
-          stack: err.stack 
-        });
-        return of(null);
-      })
-    );
-  }
-
-  getAllData(): Observable<{
-    drivers: Driver[];
-    seasons: Season[];
-    races: Race[];
-    constructors: Constructor[];
+  /** Everything the home page needs in a single subscription. */
+  getOverview(): Observable<{
+    meta: ArchiveMeta | null;
+    season: SeasonSummary;
+    champions: ChampionRow[];
+    totals: { races: number; drivers: number; constructors: number; circuits: number };
   }> {
-    this.log('info', 'Loading all data...', 'CSVDataService');
-    const startTime = Date.now();
-
-    return forkJoin({
-      drivers: this.getDriverStats(),
-      seasons: this.getSeasons(),
-      races: this.getRaces(),
-      constructors: this.getConstructors()
-    }).pipe(
-      tap({
-        next: (data) => {
-          const duration = Date.now() - startTime;
-          this.log('info', `All data loaded in ${duration}ms`, 'CSVDataService', {
-            drivers: data.drivers.length,
-            seasons: data.seasons.length,
-            races: data.races.length,
-            constructors: data.constructors.length,
-            duration: `${duration}ms`
+    return this.core$.pipe(
+      map((core) => {
+        const year = core.meta?.endYear ?? ARCHIVE_END_YEAR;
+        const champions: ChampionRow[] = [];
+        for (const standing of core.standings) {
+          if (standing.position !== 1 || !core.completeYears.has(standing.year)) continue;
+          const constructor = core.constructorById.get(standing.constructorId);
+          champions.push({
+            year: standing.year,
+            driver: core.driverById.get(standing.driverId) ?? null,
+            constructor: constructor ?? null,
+            teamColor: teamColorFor(constructor?.constructorRef),
+            points: standing.points,
+            wins: standing.wins,
           });
-        },
-        error: (err) => {
-          this.log('error', 'Failed to load all data', 'CSVDataService', { error: err.message || err });
         }
+
+        return {
+          meta: core.meta,
+          season: this.buildSeasonSummary(core, year),
+          champions: champions.sort((a, b) => b.year - a.year),
+          totals: {
+            races: core.races.length,
+            drivers: core.drivers.length,
+            constructors: core.constructors.length,
+            circuits: core.circuits.length,
+          },
+        };
       }),
-      catchError(err => {
-        this.log('error', 'Failed to load all data', 'CSVDataService', { error: err.message || err, stack: err.stack });
-        return of({ drivers: [], seasons: [], races: [], constructors: [] });
-      })
     );
   }
 
-  private parseCSV<T>(path: string, label: string): Observable<T[]> {
-    // Return cached data if available
-    if (this.cache.has(path)) {
-      this.log('debug', `Using cached CSV: ${path}`, label);
-      return of(this.cache.get(path) as T[]);
-    }
+  // -------------------------------------------------------------------------
+  // Loading
+  // -------------------------------------------------------------------------
+  private loadJson<T>(file: string): Observable<T | null> {
+    return this.http.get<T>(`${ARCHIVE}${file}`).pipe(catchError(() => of(null)));
+  }
 
-    // Return existing promise if already loading
-    if (this.cachePromises.has(path)) {
-      this.log('debug', `Using existing request: ${path}`, label);
-      return this.cachePromises.get(path) as Observable<T[]>;
-    }
+  private load<T>(file: string): Observable<T[]> {
+    const path = `${ARCHIVE}${file}`;
+    const cached = this.cache.get(path);
+    if (cached) return cached as Observable<T[]>;
 
-    this.log('debug', `Parsing CSV: ${path}`, label);
+    const request = this.http.get(path, { responseType: 'text' }).pipe(
+      map((csv) => this.parseCsv<T>(csv, file)),
+      catchError((err) => {
+        console.error(`[archive] ${file} failed`, err);
+        this.error.set(`Could not load ${file}`);
+        return of([] as T[]);
+      }),
+      finalize(() => this.cache.delete(path)),
+      shareReplay({ bufferSize: 1, refCount: false }),
+    );
 
-    const request = new Observable<T[]>(subscriber => {
-      const startTime = Date.now();
-
-      this.http.get(path, { responseType: 'text' }).subscribe({
-        next: (csv) => {
-          this.log('debug', `CSV file received: ${path} (${csv.length} chars)`, label, {
-            size: `${(csv.length / 1024).toFixed(2)} KB`
-          });
-
-          this.papa.parse(csv, {
-            header: true,
-            skipEmptyLines: true,
-            dynamicTyping: true,
-            complete: (results) => {
-              const duration = Date.now() - startTime;
-              
-              if (results.errors && results.errors.length > 0) {
-                this.log('warn', `CSV parsing completed with errors`, label, {
-                  errorCount: results.errors.length,
-                  errors: results.errors.slice(0, 5)
-                });
-              }
-
-              this.log('debug', `CSV parsed: ${path}`, label, {
-                rowCount: results.data.length,
-                duration: `${duration}ms`
-              });
-
-              // Cache the results
-              this.cache.set(path, results.data);
-              this.cachePromises.delete(path);
-
-              // Run in Angular zone to trigger change detection
-              this.zone.run(() => {
-                subscriber.next(results.data as T[]);
-                subscriber.complete();
-              });
-            },
-            error: (error: any) => {
-              const duration = Date.now() - startTime;
-              this.log('error', `CSV parse error: ${path}`, label, {
-                error: error.message,
-                duration: `${duration}ms`
-              });
-              this.cachePromises.delete(path);
-              this.zone.run(() => {
-                subscriber.error(error);
-              });
-            }
-          });
-        },
-        error: (error: HttpErrorResponse) => {
-          const duration = Date.now() - startTime;
-          
-          let errorMessage = `HTTP ${error.status}`;
-          if (error.status === 0) {
-            errorMessage = 'Network error - CORS or server not running';
-          } else if (error.status === 404) {
-            errorMessage = `File not found: ${path}`;
-          } else if (error.status >= 500) {
-            errorMessage = `Server error: ${error.status}`;
-          }
-
-          this.log('error', `CSV load failed: ${path}`, label, {
-            error: errorMessage,
-            status: error.status,
-            statusText: error.statusText,
-            duration: `${duration}ms`
-          });
-
-          this.cachePromises.delete(path);
-          subscriber.error(new Error(errorMessage));
-        }
-      });
-    });
-
-    this.cachePromises.set(path, request);
+    this.cache.set(path, request as Observable<unknown[]>);
     return request;
   }
+
+  private parseCsv<T>(csv: string, label: string): T[] {
+    let rows: T[] = [];
+    try {
+      this.papa.parse(csv, {
+        header: true,
+        skipEmptyLines: 'greedy',
+        dynamicTyping: true,
+        complete: (result) => {
+          rows = (result.data ?? []).filter(Boolean) as T[];
+        },
+      });
+    } catch (err) {
+      console.error(`[archive] ${label} parse error`, err);
+      return [];
+    }
+    return rows;
+  }
+
+  // -------------------------------------------------------------------------
+  // Indexing
+  // -------------------------------------------------------------------------
+  private build(raw: {
+    meta: ArchiveMeta | null;
+    drivers: Record<string, unknown>[];
+    constructors: Record<string, unknown>[];
+    circuits: Record<string, unknown>[];
+    races: Record<string, unknown>[];
+    results: Record<string, unknown>[];
+    qualifying: Record<string, unknown>[];
+    status: Record<string, unknown>[];
+    standings: Record<string, unknown>[];
+    constructorStandings: Record<string, unknown>[];
+  }): CoreData {
+    const drivers: Driver[] = raw.drivers.map((row) => ({
+      driverId: num(row['driverId']),
+      driverRef: text(row['driverRef']),
+      number: numOrNull(row['number']),
+      code: text(row['code']) || null,
+      forename: text(row['forename']),
+      surname: text(row['surname']),
+      dob: text(row['dob']) || null,
+      nationality: text(row['nationality']).trim(),
+      url: text(row['url']),
+    }));
+
+    const constructors: Constructor[] = raw.constructors.map((row) => ({
+      constructorId: num(row['constructorId']),
+      constructorRef: text(row['constructorRef']),
+      name: text(row['name']),
+      nationality: text(row['nationality']).trim(),
+      url: text(row['url']),
+    }));
+
+    const circuits: Circuit[] = raw.circuits.map((row) => ({
+      circuitId: num(row['circuitId']),
+      circuitRef: text(row['circuitRef']),
+      name: text(row['name']),
+      location: text(row['location']),
+      country: text(row['country']),
+      lat: numOrNull(row['lat']),
+      lng: numOrNull(row['lng']),
+      alt: numOrNull(row['alt']),
+      url: text(row['url']),
+    }));
+
+    const races: Race[] = raw.races
+      .map((row) => ({
+        raceId: num(row['raceId']),
+        year: num(row['year']),
+        round: num(row['round']),
+        circuitId: num(row['circuitId']),
+        name: text(row['name']),
+        date: text(row['date']),
+        time: text(row['time']) || null,
+        url: text(row['url']),
+      }))
+      .sort((a, b) => a.raceId - b.raceId);
+
+    const results: Result[] = raw.results.map((row) => ({
+      resultId: num(row['resultId']),
+      raceId: num(row['raceId']),
+      driverId: num(row['driverId']),
+      constructorId: num(row['constructorId']),
+      number: numOrNull(row['number']),
+      grid: num(row['grid']),
+      position: numOrNull(row['position']),
+      positionText: text(row['positionText']),
+      positionOrder: num(row['positionOrder']),
+      points: num(row['points']),
+      laps: num(row['laps']),
+      time: text(row['time']) || null,
+      milliseconds: numOrNull(row['milliseconds']),
+      fastestLap: numOrNull(row['fastestLap']),
+      rank: numOrNull(row['rank']),
+      fastestLapTime: text(row['fastestLapTime']) || null,
+      fastestLapSpeed: text(row['fastestLapSpeed']) || null,
+      statusId: num(row['statusId']),
+    }));
+
+    const qualifying: Qualifying[] = raw.qualifying.map((row) => ({
+      qualifyId: num(row['qualifyId']),
+      raceId: num(row['raceId']),
+      driverId: num(row['driverId']),
+      constructorId: num(row['constructorId']),
+      number: numOrNull(row['number']),
+      position: num(row['position']),
+      q1: text(row['q1']) || null,
+      q2: text(row['q2']) || null,
+      q3: text(row['q3']) || null,
+    }));
+
+    const standings: SeasonStanding[] = raw.standings.map((row) => ({
+      year: num(row['year']),
+      driverId: num(row['driverId']),
+      position: num(row['position']),
+      points: num(row['points']),
+      wins: num(row['wins']),
+      constructorId: num(row['constructorId']),
+    }));
+
+    const constructorStandings: SeasonConstructorStanding[] = raw.constructorStandings.map((row) => ({
+      year: num(row['year']),
+      constructorId: num(row['constructorId']),
+      position: num(row['position']),
+      points: num(row['points']),
+      wins: num(row['wins']),
+    }));
+
+    const driverById = new Map(drivers.map((driver) => [driver.driverId, driver]));
+    const constructorById = new Map(constructors.map((constructor) => [constructor.constructorId, constructor]));
+    const circuitById = new Map(circuits.map((circuit) => [circuit.circuitId, circuit]));
+    const raceById = new Map(races.map((race) => [race.raceId, race]));
+    const yearOfRace = new Map(races.map((race) => [race.raceId, race.year]));
+    const statusById = new Map(raw.status.map((row) => [num(row['statusId']), text(row['status'])]));
+
+    const resultsByRace = groupBy(results, (row) => row.raceId);
+    const resultsByDriver = groupBy(results, (row) => row.driverId);
+    const qualifyingByRace = groupBy(qualifying, (row) => row.raceId);
+    const qualifyingByDriver = groupBy(qualifying, (row) => row.driverId);
+    const standingsByDriver = groupBy(standings, (row) => row.driverId);
+    const constructorStandingsByConstructor = groupBy(constructorStandings, (row) => row.constructorId);
+
+    const core: CoreData = {
+      meta: raw.meta,
+      drivers,
+      driverById,
+      constructors,
+      constructorById,
+      circuits,
+      circuitById,
+      races,
+      raceById,
+      yearOfRace,
+      results,
+      resultsByRace,
+      resultsByDriver,
+      qualifying,
+      qualifyingByRace,
+      qualifyingByDriver,
+      standings,
+      standingsByDriver,
+      constructorStandings,
+      constructorStandingsByConstructor,
+      statusById,
+      driverCareers: [],
+      constructorCareers: [],
+      circuitCareers: [],
+      latestRace: null,
+      nextRace: null,
+      roundsByYear: new Map(),
+      completeYears: new Set(),
+    };
+
+    // A race counts as run when it has results. The 2026 calendar is bundled in
+    // full, so "latest race" must never mean "last round in the file".
+    const hasResults = (race: Race) => (resultsByRace.get(race.raceId)?.length ?? 0) > 0;
+    const today = new Date().toISOString().slice(0, 10);
+    const completed = races.filter(hasResults);
+
+    core.latestRace = completed.length ? completed[completed.length - 1] : null;
+    core.nextRace =
+      races.find((race) => !hasResults(race) && race.date >= today) ??
+      races.find((race) => !hasResults(race)) ??
+      null;
+
+    const years = [...new Set(races.map((race) => race.year))];
+    for (const year of years) {
+      core.roundsByYear.set(
+        year,
+        races.filter((race) => race.year === year),
+      );
+    }
+
+    // Trust meta.json: it knows which championships are actually decided and
+    // therefore which seasons may be labelled "champion".
+    const declared = raw.meta?.completeYears ?? [];
+    for (const year of years) {
+      const complete = declared.length
+        ? declared.includes(year)
+        : year < (raw.meta?.endYear ?? ARCHIVE_END_YEAR);
+      if (complete) core.completeYears.add(year);
+    }
+
+    core.driverCareers = this.buildDriverCareers(core);
+    core.constructorCareers = this.buildConstructorCareers(core);
+    core.circuitCareers = this.buildCircuitCareers(core);
+    return core;
+  }
+
+  private buildDriverCareers(core: CoreData): DriverCareer[] {
+    const latestYear = core.meta?.endYear ?? ARCHIVE_END_YEAR;
+
+    return core.drivers
+      .map((driver) => {
+        const results = (core.resultsByDriver.get(driver.driverId) ?? []).slice().sort((a, b) => a.raceId - b.raceId);
+        const qualifying = core.qualifyingByDriver.get(driver.driverId) ?? [];
+        const standings = core.standingsByDriver.get(driver.driverId) ?? [];
+
+        const years = [...new Set(results.map((row) => core.yearOfRace.get(row.raceId)).filter(isNumber))].sort(
+          (a, b) => a - b,
+        );
+
+        const lastResult = results[results.length - 1];
+        const lastConstructor = lastResult ? core.constructorById.get(lastResult.constructorId) : undefined;
+        const ref = lastConstructor?.constructorRef;
+
+        return {
+          ...driver,
+          wins: results.filter((row) => row.position === 1).length,
+          podiums: results.filter((row) => row.position !== null && row.position <= 3).length,
+          poles: qualifying.filter((row) => row.position === 1).length,
+          championships: standings.filter((row) => row.position === 1).length,
+          starts: results.length,
+          points: round(results.reduce((sum, row) => sum + row.points, 0)),
+          debutYear: years[0] ?? null,
+          lastYear: years[years.length - 1] ?? null,
+          seasonsCount: years.length,
+          teamRef: ref ?? '',
+          teamName: lastConstructor?.name ?? '—',
+          teamColor: teamColorFor(ref),
+          active: years.length > 0 && years[years.length - 1] >= latestYear,
+        } satisfies DriverCareer;
+      })
+      .sort((a, b) => b.championships - a.championships || b.wins - a.wins || b.podiums - a.podiums);
+  }
+
+  private buildConstructorCareers(core: CoreData): ConstructorCareer[] {
+    const latestYear = core.meta?.endYear ?? ARCHIVE_END_YEAR;
+
+    return core.constructors
+      .map((constructor) => {
+        const results = core.results.filter((row) => row.constructorId === constructor.constructorId);
+        const standings = core.constructorStandingsByConstructor.get(constructor.constructorId) ?? [];
+        const years = [...new Set(results.map((row) => core.yearOfRace.get(row.raceId)).filter(isNumber))].sort(
+          (a, b) => a - b,
+        );
+        const drivers = new Set(results.map((row) => row.driverId));
+
+        return {
+          ...constructor,
+          wins: results.filter((row) => row.position === 1).length,
+          podiums: results.filter((row) => row.position !== null && row.position <= 3).length,
+          championships: standings.filter((row) => row.position === 1).length,
+          starts: results.length,
+          points: round(results.reduce((sum, row) => sum + row.points, 0)),
+          firstYear: years[0] ?? null,
+          lastYear: years[years.length - 1] ?? null,
+          seasonsCount: years.length,
+          driversCount: drivers.size,
+          color: teamColorFor(constructor.constructorRef),
+          active: years.length > 0 && years[years.length - 1] >= latestYear,
+          championYears: standings
+            .filter((row) => row.position === 1)
+            .map((row) => row.year)
+            .sort((a, b) => a - b),
+          drivers: [...drivers]
+            .map((id) => core.driverById.get(id))
+            .filter((driver): driver is Driver => !!driver)
+            .sort((a, b) => a.surname.localeCompare(b.surname)),
+        } satisfies ConstructorCareer;
+      })
+      .sort((a, b) => b.championships - a.championships || b.wins - a.wins || b.podiums - a.podiums);
+  }
+
+  private buildCircuitCareers(core: CoreData): CircuitCareer[] {
+    return core.circuits
+      .map((circuit) => {
+        const races = core.races.filter((race) => race.circuitId === circuit.circuitId);
+        const years = [...new Set(races.map((race) => race.year))].sort((a, b) => a - b);
+        return {
+          ...circuit,
+          races: races.length,
+          firstYear: years[0] ?? null,
+          lastYear: years[years.length - 1] ?? null,
+          color: colorFromId(circuit.circuitId),
+        } satisfies CircuitCareer;
+      })
+      .sort((a, b) => b.races - a.races || a.name.localeCompare(b.name));
+  }
+
+  private buildSeasonSummary(core: CoreData, year: number): SeasonSummary {
+    const races = core.roundsByYear.get(year) ?? [];
+    const hasResults = (race: Race) => (core.resultsByRace.get(race.raceId)?.length ?? 0) > 0;
+    const completedRaces = races.filter(hasResults);
+    const latest = completedRaces.length ? completedRaces[completedRaces.length - 1] : null;
+    const next = races.find((race) => !hasResults(race)) ?? null;
+    const complete = core.completeYears.has(year);
+
+    const standings = core.standings
+      .filter((row) => row.year === year)
+      .sort((a, b) => a.position - b.position)
+      .map((row) => {
+        const driver = core.driverById.get(row.driverId);
+        const constructor = core.constructorById.get(row.constructorId);
+        return {
+          position: row.position,
+          points: row.points,
+          wins: row.wins,
+          driver,
+          constructor,
+          teamColor: teamColorFor(constructor?.constructorRef),
+        } satisfies StandingsRow;
+      });
+
+    const constructorStandings = core.constructorStandings
+      .filter((row) => row.year === year)
+      .sort((a, b) => a.position - b.position)
+      .map((row) => {
+        const constructor = core.constructorById.get(row.constructorId);
+        return { ...row, constructor, color: teamColorFor(constructor?.constructorRef) };
+      });
+
+    return {
+      year,
+      complete,
+      roundsTotal: races.length,
+      roundsCompleted: completedRaces.length,
+      standings,
+      constructorStandings,
+      leader: standings[0] ?? null,
+      champion: complete ? standings[0] ?? null : null,
+      latestRace: latest ? this.buildRace(core, latest.raceId) : null,
+      nextRace: next
+        ? { race: next, circuit: core.circuitById.get(next.circuitId) ?? null, complete: false }
+        : null,
+    };
+  }
+
+  // -------------------------------------------------------------------------
+  // Derived views
+  // -------------------------------------------------------------------------
+  private buildRace(core: CoreData, raceId: number): RaceWithResults | null {
+    const race = core.raceById.get(raceId);
+    if (!race) return null;
+
+    const results: EnrichedResult[] = (core.resultsByRace.get(raceId) ?? [])
+      .slice()
+      .sort((a, b) => a.positionOrder - b.positionOrder)
+      .map((row) => this.enrichRow(core, row));
+
+    const podium = results.filter((row) => row.position !== null && row.position <= 3).slice(0, 3);
+
+    const fastestLap =
+      results
+        .filter((row) => row.fastestLapTime)
+        .sort((a, b) => Number(a.rank ?? 99) - Number(b.rank ?? 99))[0] ?? null;
+
+    const qualifying = (core.qualifyingByRace.get(raceId) ?? [])
+      .slice()
+      .sort((a, b) => a.position - b.position)
+      .map((row) => ({
+        ...row,
+        driver: core.driverById.get(row.driverId),
+        constructor: core.constructorById.get(row.constructorId),
+      }));
+
+    return {
+      race,
+      circuit: core.circuitById.get(race.circuitId) ?? null,
+      results,
+      podium,
+      fastestLap,
+      qualifying,
+    };
+  }
+
+  private enrichRow(core: CoreData, row: Result): EnrichedResult {
+    const constructor = core.constructorById.get(row.constructorId) ?? null;
+    return {
+      ...row,
+      driver: core.driverById.get(row.driverId) ?? null,
+      constructor,
+      status: core.statusById.get(row.statusId) ?? '',
+      teamColor: teamColorFor(constructor?.constructorRef),
+    };
+  }
+
+  private buildDriverSeasons(core: CoreData, driverId: number): DriverSeasonRow[] {
+    const standings = core.standingsByDriver.get(driverId) ?? [];
+    const results = core.resultsByDriver.get(driverId) ?? [];
+    const qualifying = core.qualifyingByDriver.get(driverId) ?? [];
+
+    return standings
+      .slice()
+      .sort((a, b) => a.year - b.year)
+      .map((standing) => {
+        const seasonResults = results.filter((row) => core.yearOfRace.get(row.raceId) === standing.year);
+        const seasonQualifying = qualifying.filter((row) => core.yearOfRace.get(row.raceId) === standing.year);
+        const constructor = core.constructorById.get(standing.constructorId);
+        return {
+          year: standing.year,
+          position: standing.position,
+          points: standing.points,
+          wins: seasonResults.filter((row) => row.position === 1).length,
+          podiums: seasonResults.filter((row) => row.position !== null && row.position <= 3).length,
+          poles: seasonQualifying.filter((row) => row.position === 1).length,
+          races: seasonResults.length,
+          teamRef: constructor?.constructorRef ?? '',
+          teamName: constructor?.name ?? '—',
+          teamColor: teamColorFor(constructor?.constructorRef),
+        } satisfies DriverSeasonRow;
+      });
+  }
+
+  private buildRivalry(core: CoreData, driverId: number): RivalryData {
+    const driver = core.driverById.get(driverId) ?? null;
+    const lastResult = (core.resultsByDriver.get(driverId) ?? []).slice(-1)[0];
+    const constructor = lastResult ? core.constructorById.get(lastResult.constructorId) : undefined;
+
+    return {
+      driverId,
+      driver,
+      driverName: driver ? `${driver.forename} ${driver.surname}` : 'Unknown driver',
+      teamColor: teamColorFor(constructor?.constructorRef),
+      seasons: this.buildDriverSeasons(core, driverId).map((season) => ({
+        year: season.year,
+        position: season.position,
+        points: season.points,
+        wins: season.wins,
+        podiums: season.podiums,
+        poles: season.poles,
+      })),
+    };
+  }
+
+  private buildEmpty(): CoreData {
+    return {
+      meta: null,
+      drivers: [],
+      driverById: new Map(),
+      constructors: [],
+      constructorById: new Map(),
+      circuits: [],
+      circuitById: new Map(),
+      races: [],
+      raceById: new Map(),
+      yearOfRace: new Map(),
+      results: [],
+      resultsByRace: new Map(),
+      resultsByDriver: new Map(),
+      qualifying: [],
+      qualifyingByRace: new Map(),
+      qualifyingByDriver: new Map(),
+      standings: [],
+      standingsByDriver: new Map(),
+      constructorStandings: [],
+      constructorStandingsByConstructor: new Map(),
+      statusById: new Map(),
+      driverCareers: [],
+      constructorCareers: [],
+      circuitCareers: [],
+      latestRace: null,
+      nextRace: null,
+      roundsByYear: new Map(),
+      completeYears: new Set(),
+    };
+  }
 }
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+function num(value: unknown): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function numOrNull(value: unknown): number | null {
+  if (value === null || value === undefined || value === '') return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function text(value: unknown): string {
+  return value === null || value === undefined ? '' : String(value);
+}
+
+function round(value: number): number {
+  return Math.round(value * 100) / 100;
+}
+
+function isNumber(value: number | undefined): value is number {
+  return typeof value === 'number' && Number.isFinite(value);
+}
+
+function groupBy<T>(items: T[], key: (item: T) => number): Map<number, T[]> {
+  const map = new Map<number, T[]>();
+  for (const item of items) {
+    const id = key(item);
+    const bucket = map.get(id);
+    if (bucket) bucket.push(item);
+    else map.set(id, [item]);
+  }
+  return map;
+}
+
+export { colorFromId, hexAlpha };

@@ -6,7 +6,14 @@
     "start": "node backend/server.js",
     "import": "cd backend && npm run import",
     "frontend": "cd frontend && npm start",
-    "build": "cd frontend && npm run build"
+    "build": "cd frontend && npm run build",
+    "data:prune": "node scripts/prune-archive.mjs",
+    "data:sync": "node scripts/sync-current-season.mjs",
+    "data:build": "node scripts/prune-archive.mjs && node scripts/sync-current-season.mjs",
+    "assets:fetch": "node scripts/fetch-assets.mjs",
+    "outlines:build": "node scripts/extract-circuit-outlines.mjs",
+    "docs:build": "python scripts/build-docs.py",
+    "deck:build": "python scripts/build-deck.py"
   },
   "dependencies": {}
 }
